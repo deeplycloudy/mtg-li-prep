@@ -39,7 +39,7 @@ def create_parser():
 
     return parser
 
-
+import os
 from glmtools.io.imagery import open_glm_time_series
 
 if __name__ == '__main__':
@@ -50,7 +50,7 @@ if __name__ == '__main__':
     from dask.distributed import Client
     dask_client=Client(n_workers=args.dask_workers, threads_per_worker=args.dask_threads)
     print(dask_client)
-    from chunks import rechunker_wrapper
+    # from chunks import rechunker_wrapper
     import numpy as np
 
 
@@ -79,10 +79,10 @@ if __name__ == '__main__':
 # 64x64 spatial tiles are 165 Mpixels per variable
 #     In [85]: 64*64*(24*60)*30/(1024**3)
 #     Out[85]: 0.164794921875
-        if i == 0:
-            ltg_ds_nc.to_zarr(zarr_store, consolidated=True, mode='w')
-        else:
+        if os.path.exists(zarr_store):
             ltg_ds_nc.to_zarr(zarr_store, consolidated=True, append_dim='time')
+        else:
+            ltg_ds_nc.to_zarr(zarr_store, consolidated=True, mode='w')
         # Cannot run this with Distributed client - get error
         # distributed.utils_perf - WARNING - full garbage collections took 10% CPU time recently
 #             rechunker_wrapper(ltg_ds_nc, zarr_store, temp_zarr_store, chunks=rechunk_spec,  consolidated=True)
