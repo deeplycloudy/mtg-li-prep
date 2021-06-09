@@ -19,23 +19,23 @@ def create_parser():
     parser.add_argument('-x', '--x_chunks',
                         metavar='number of x gridpoints per chunk',
                         required=False, dest='x_chunks', action='store',
-                        default=678)
+                        default=678, type=int)
     parser.add_argument('-y', '--y_chunks',
                         metavar='number of y gridpoints per chunk',
                         required=False, dest='y_chunks', action='store',
-                        default=678)
+                        default=678, type=int)
     parser.add_argument('-t', '--t_chunks',
                         metavar='number of time intervals per chunk',
                         required=False, dest='t_chunks', action='store',
-                        default=60)
+                        default=60, type=int)
     parser.add_argument('--dask_workers',
                         metavar='number of dask workers',
                         required=False, dest='dask_workers', action='store',
-                        default=1)
+                        default=1, type=int)
     parser.add_argument('--dask_threads',
                         metavar='number of threads per dask worker',
                         required=False, dest='dask_threads', action='store',
-                        default=2)
+                        default=2, type=int)
 
     return parser
 
