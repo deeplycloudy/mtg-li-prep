@@ -30,11 +30,11 @@ def create_parser():
                         default=60)
     parser.add_argument('--dask_workers',
                         metavar='number of dask workers',
-                        required=False, dest='n_workers', action='store',
+                        required=False, dest='dask_workers', action='store',
                         default=1)
     parser.add_argument('--dask_threads',
                         metavar='number of threads per dask worker',
-                        required=False, dest='n_threads', action='store',
+                        required=False, dest='dask_threads', action='store',
                         default=2)
 
     return parser
