@@ -107,6 +107,28 @@ do_rolling = True
 #         outnames.append(outname)
 #     return outnames
 
+def chop_by_hour(ds):
+    onehr = np.timedelta64(1, 'h')
+    
+    raw_tmin = ds.time.min().data
+    raw_tmax = ds.time.max().data
+    # print(raw_tmin, raw_tmax)
+    
+    # Get min, max time from dataset. Truncates, so add one hour to get the inclusive time range at the end.
+    tmin, tmax = raw_tmin.astype('datetime64[h]'), raw_tmax.astype('datetime64[h]')+onehr
+    # print(tmin, tmax)
+    time_bins = np.arange(tmin, tmax+onehr, onehr)
+    for t0, t1 in zip(time_bins[:-1], time_bins[1:]):
+        # print(t0, t1)
+        t_idx = (ds.time >= t0) & (ds.time < t1)
+        with dask.config.set(**{'array.slicing.split_large_chunks': True}):
+            times = ds.time[t_idx]
+            ds_sub = ds.sel({'time':times})
+        # ds_sub = ds[{'time':t_idx}] # Slicing causes chunks to be lost,
+        # # Though .sel seems to as well.
+        # print(ds_sub.dims, ds_sub.time.min().data, ds_sub.time.max())
+        yield ds_sub
+
 
 if __name__ == '__main__':
     parser = create_parser()
@@ -118,6 +140,8 @@ if __name__ == '__main__':
     agg_minutes = args.agg_minutes
     rechunk_spec = {'x':args.x_chunks, 'y':args.y_chunks, 'time':args.t_chunks}
 
+    import dask
+    dask.config.set(split_every=2)
     from dask.distributed import Client
     dask_client=Client(n_workers=args.dask_workers, threads_per_worker=args.dask_threads)
     print(dask_client)
@@ -132,8 +156,11 @@ if __name__ == '__main__':
     #     ltg_agg = ltg_agg.rename({'time_bins':'grid_time'})
     # ltg_agg=ltg_agg.sortby('grid_time')
 
-
-    ltg_ds = xr.open_zarr(args.zarr_in, chunks='auto')
+    in_chunk = rechunk_spec.copy()
+    in_chunk['time']=1
+    in_chunk['x']=1356
+    in_chunk['y']=1356
+    ltg_ds = xr.open_zarr(args.zarr_in, chunks='auto').sortby(['time']).chunk(in_chunk) #.isel({'time':slice(0,60)})
     print("opened data")
     print(ltg_ds.chunks)
 
@@ -152,21 +179,39 @@ if __name__ == '__main__':
 
     skip_agg = ['goes_imager_projection', 'nominal_satellite_subpoint_lat',
                 'nominal_satellite_subpoint_lon', 'DQF']
-    ltg_agg = aggregate(ltg_ds.drop(skip_agg),
-                        agg_minutes, rolling=do_rolling).drop(
-                        ['total_flash_area', 'total_group_area'])
-    print("aggregated")
+    skip_agg += ['flash_centroid_density','group_extent_density','group_centroid_density','average_flash_area','average_group_area',]
+
     # Rename aggregated variables to indicate they are windowed.
     orig_vars = ['flash_extent_density',
-    'flash_centroid_density',
+    #'flash_centroid_density',
     'total_energy',
     'event_flash_fraction',
-    'group_extent_density',
-    'group_centroid_density',
-    'average_flash_area',
-    'average_group_area',
-    'minimum_flash_area',]
+    #'group_extent_density',
+    #'group_centroid_density',
+    #'average_flash_area',
+    #'average_group_area',
+    'minimum_flash_area',
+    ]
     window_vars = {v:v+'_window' for v in orig_vars}
+    
+    ltg_ds = ltg_ds.drop(skip_agg)
+
+# New: make dask understand
+    #n_times = ltg_ds.dims['time']
+    #all_aggs = []
+    #for ti in range(n_times):
+    #    max_ti = min(n_times,ti+agg_minutes*3)
+    #    pre_agg = ltg_ds.isel({'time':slice(ti, max_ti)})
+    #    this_agg = aggregate(pre_agg, agg_minutes, rolling=do_rolling).rename(window_vars)
+    #    all_aggs.append(this_agg)
+    #ltg_agg = xr.concat(all_aggs, concat_dim='time')
+
+# End new idea
+
+    ltg_agg = aggregate(ltg_ds,
+                        agg_minutes, rolling=do_rolling)#.drop(
+#                        ['total_flash_area', 'total_group_area'])
+    print("aggregated")
 
     ltg_agg=ltg_agg.rename(window_vars)
     # print("renamed")
@@ -187,9 +232,7 @@ if __name__ == '__main__':
                 ds_out[var].encoding.pop('preferred_chunks', None)
     #         for var in ds_out.variables.keys():
     #             print(ds_out[var].encoding)
-        out_chunks = rechunk_spec.copy()
-    #         out_chunks['time'] = 15
-        print(out_chunks)
+        out_chunks = rechunk_spec
         if os.path.exists(zarr_store):
             ds_out.to_zarr(zarr_store, consolidated=True, append_dim='time')
         else:
@@ -197,14 +240,25 @@ if __name__ == '__main__':
         # outnames = write_ncs(ds_out)
         # print(outnames)
     else:
-        ds_out = ltg_agg[drop_times]
-        out_chunks = rechunk_spec.copy()
+        ds_out = ltg_agg[drop_times]#.chunk(rechunk_spec)
+
+        for var in ds_out.variables.keys():
+            if 'chunks' in ds_out[var].encoding:
+                # print("popping in ", var)
+                ds_out[var].encoding.pop('chunks', None)
+                ds_out[var].encoding.pop('preferred_chunks', None)
+
+        print(ds_out.chunks)
         print(ds_out)
         print("ready to compute")
 
-        if os.path.exists(zarr_store):
-            ds_out.to_zarr(zarr_store, consolidated=True, append_dim='time')
-        else:
-            ds_out.chunk(out_chunks).to_zarr(zarr_store, consolidated=True, mode='w')
+        for ds_sub in chop_by_hour(ds_out):
+	    # Manually loop over each hour to keep Dask task graph small (maybe)
+            print(ds_sub.dims, ds_sub.time.min().data, ds_sub.time.max())
+
+            if os.path.exists(zarr_store):
+                ds_sub.chunk(rechunk_spec).to_zarr(zarr_store, consolidated=True, append_dim='time')
+            else:
+                ds_sub.chunk(rechunk_spec).to_zarr(zarr_store, consolidated=True, mode='w')
 
 
