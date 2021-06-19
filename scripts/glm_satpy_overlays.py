@@ -69,7 +69,7 @@ from overlap import regions as overlap_regions
 
 
 # CONFIG
-coast_dir = '/data/shapefiles/gshhg-shp-2/'
+coast_dir = '/archive/shapefiles/gshhg-shp-2/'
 
 # works with scene.show and writer.add_overlay
 overlay_spec = {'coast_dir':coast_dir, 'color':(64,128,255), 'width':1}
@@ -154,9 +154,16 @@ def get_goes_area(ds):
 def lims_to_bbox(lims):
     return lims[0], lims[2], lims[1], lims[3]
 
+# @dask.delayed
 def data_for_time(glm_fn, abi_filenames, time, debug=False):
     ltg_ds = xr.open_zarr(glm_fn)
-    abi_ds = open_abi_time_series(abi_filenames, chunks={'x':1356, 'y':1356})
+    if 'windowed' in glm_fn:
+        orig = glm_fn.replace('_windowed', '')
+        orig_ltg_ds = xr.open_zarr(orig)
+        ltg_ds['goes_imager_projection'] = orig_ltg_ds['goes_imager_projection']
+        orig_ltg_ds.close()
+    # abi_ds = open_abi_time_series(abi_filenames, chunks={'x':1356, 'y':1356})
+    abi_ds = xr.open_zarr(abi_filenames[0]) #, chunks={'x':1356, 'y':1356})
 
     this_ltg = ltg_ds.sel(time=time, method='nearest')
     this_sat = abi_ds.sel(time=time, method='nearest')
@@ -184,7 +191,6 @@ def save_each_region(scene, time, composite, prefix=''):
 
         decorate = deepcopy(decorate_spec)
         decorate["decorate"][0]["text"]["txt"] = str(time.dt.strftime("%Y-%m-%d %H:%M UTC").data)
-
         scn.save_dataset(composite, filename=outname, overlay=overlay_spec, decorate=decorate)
 
 # @dask.delayed
@@ -205,19 +211,28 @@ def build_one_scene(this_ltg, this_sat, fields):
     scn['C13'] = da
     for field in fields:
         da = this_ltg[field]
-        da.attrs['sensor']='glm'
-        da.attrs['name']=field
-        da.attrs['area'] = get_goes_area(this_ltg)
-        scn[field] = da
+        masked_da = xr.where(da>0.1e-15, da, np.nan)
+        masked_da.name = this_ltg[field].name
+        masked_da.attrs['sensor']='glm'
+        masked_da.attrs['name']=field
+        masked_da.attrs['area'] = get_goes_area(this_ltg)
+        scn[field] = masked_da
+        # print(field, scn[field].min().compute().data, scn[field].max().compute().data)
     return scn
 
-@dask.delayed
+#@dask.delayed
 def process_one_time(glm_fn, abi_fns, grid_time, fields, outfile_prefix):
     this_ltg, this_sat = data_for_time(glm_fn, abi_fns, grid_time)
     scn = build_one_scene(this_ltg, this_sat, fields)
     for field in fields:
         composite = 'C13_'+field
         save_each_region(scn, grid_time, composite, prefix=outfile_prefix)
+
+from itertools import zip_longest
+def grouper(n, iterable, fillvalue=None):
+    "grouper(3, 'ABCDEFG', 'x') --> ABC DEF Gxx"
+    args = [iter(iterable)] * n
+    return zip_longest(fillvalue=fillvalue, *args)
 
 def main(glm_fn, abi_fns, do_window=False, outfile_prefix=''):
     fields = ['flash_extent_density', 'minimum_flash_area',
@@ -227,17 +242,32 @@ def main(glm_fn, abi_fns, do_window=False, outfile_prefix=''):
     else:
         single_or_window_fields = fields
 
+    start_index=0
+    # Inevitably things crash, here's how to find the time for start_index:
+    # glm_ds = xr.open_zarr('../../GLMF_201809_windowed.zarr/')
+    # ts=glm_ds.time.sortby('time')
+    # ts[19*60+38]
+    # 19*60+38
     glm_ds = xr.open_zarr(glm_fn)
-    glm_times = glm_ds.time[0:10].compute()
+    glm_times = glm_ds.time.sortby('time')[start_index:].compute()
     glm_ds.close()
 
-    filename_lists = []
-    for iframe, grid_time in enumerate(glm_times):
-        filename_lists.append(process_one_time(glm_fn, abi_fns, grid_time,
-            single_or_window_fields, outfile_prefix))
-    print(filename_lists)
-    dask.compute(*filename_lists)
-            # CONFIG in path above
+
+
+    #filename_lists = []
+    #for iframe, grid_time in enumerate(glm_times):
+    #    filename_lists.append(process_one_time(glm_fn, abi_fns, grid_time,
+    #        single_or_window_fields, outfile_prefix))
+    #print(filename_lists)
+    #dask.compute(*filename_lists)
+
+    # Manually loop over chunks to work around some sort of memory leak
+    for these_times in grouper(120, glm_times):
+        with Pool(12) as p:
+            args = [(glm_fn, abi_fns, grid_time,
+                     single_or_window_fields, outfile_prefix)
+                     for grid_time in these_times if grid_time is not None]
+            p.starmap(process_one_time, args)
 
 if __name__=='__main__':
     parser = create_parser()
@@ -245,9 +275,11 @@ if __name__=='__main__':
 
     import dask
     # dask.config.set(split_every=4)
-    from dask.distributed import Client
-    dask_client=Client(n_workers=args.dask_workers, threads_per_worker=args.dask_threads)
-    print(dask_client)
+    #from dask.distributed import Client
+    #dask_client=Client(n_workers=args.dask_workers, threads_per_worker=args.dask_threads)
+    #print(dask_client)
+    from multiprocessing import Pool
+
 
     abi_filenames = args.abi_filenames
     abi_filenames.sort()
